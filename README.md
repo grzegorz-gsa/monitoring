@@ -1,0 +1,2 @@
+# monitoring
+Prometheus i Grafana
