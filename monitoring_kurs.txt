@@ -1,0 +1,416 @@
+### DevOps 14.02 - Monitoring (Prometheus, Grafana) ###
+
+materiały od prowadzącego:
+https://drive.proton.me/urls/P5PFSBZ3A8#2HKa351Xqzf9
+
+
+### PROMETHEUS ###
+
+https://github.com/last9/prometheus-
+
+
+### przygotowanie maszyny ###
+
+sudo apt update
+sudo apt -y install curl wget tar gzip
+hostname -I
+
+
+### instalacja exportera - node export ###
+
+cd /tmp 
+VER="1.10.2" 
+wget https://github.com/prometheus/node_exporter/releases/download/v${VER}/node_exporter-${VER}.linux-amd64.tar.gz
+tar -xvf node_exporter-${VER}.linux-amd64.tar.gz
+sudo mv node_exporter-${VER}.linux-amd64/node_exporter /usr/local/bin/node_exporter
+sudo chmod +x /usr/local/bin/node_exporter
+
+sudo useradd --no-create-home --shell /usr/sbin/nologin node_exporter || true
+
+sudo tee /etc/systemd/system/node_exporter.service >/dev/null <<'EOF'
+[Unit]
+Description=Prometheus Node Exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now node_exporter
+sudo systemctl status node_exporter --no-pager
+curl -s http://127.0.0.1:9100/metrics | head
+
+
+### instalacja prometheusa ###
+
+cd /tmp
+PVER="3.5.1"
+wget https://github.com/prometheus/prometheus/releases/download/v${PVER}/prometheus-${PVER}.linux-amd64.tar.gz
+tar -xvf prometheus-${PVER}.linux-amd64.tar.gz
+sudo mkdir -p /etc/prometheus /var/lib/prometheus
+sudo mv prometheus-${PVER}.linux-amd64/prometheus /usr/local/bin/
+sudo mv prometheus-${PVER}.linux-amd64/promtool /usr/local/bin/
+sudo mv prometheus-${PVER}.linux-amd64/consoles /etc/prometheus/
+sudo mv prometheus-${PVER}.linux-amd64/console_libraries /etc/prometheus/
+sudo chmod +x /usr/local/bin/prometheus /usr/local/bin/promtool
+
+sudo useradd --no-create-home --shell /usr/sbin/nologin prometheus || true
+sudo chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+
+sudo tee /etc/prometheus/prometheus.yml >/dev/null <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: "node"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+EOF
+
+sudo chown prometheus:prometheus /etc/prometheus/prometheus.yml
+sudo /usr/local/bin/promtool check config /etc/prometheus/prometheus.yml
+
+sudo tee /etc/systemd/system/prometheus.service >/dev/null <<'EOF'
+[Unit]
+Description=Prometheus
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now prometheus
+sudo systemctl status prometheus --no-pager
+
+
+### przykładowe query ###
+
+round(100*(avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))),0.01)
+
+round(100*(node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes),0.01)
+
+wolne miejsce na wybranym mount poincie
+100*(node_filesystem_avail_bytes{mountpoint="/"}/node_filesystem_size_bytes{mountpoint="/"})
+
+
+### cAdvisor na dockerze ###
+
+https://docs.docker.com/engine/install/ubuntu/
+
+sudo docker run -d \
+  --name=cadvisor \
+  --restart=unless-stopped \
+  -p 8080:8080 \
+  -v /:/rootfs:ro \
+  -v /var/run:/var/run:ro \
+  -v /sys:/sys:ro \
+  -v /var/lib/docker/:/var/lib/docker:ro \
+  gcr.io/cadvisor/cadvisor:latest
+
+
+### dodanie cAdvisor do prometheusa ###
+
+cd /etc/prometheus
+sudo vim prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: "node"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+
+
+sudo promtool check config /etc/prometheus/prometheus.yml
+Checking /etc/prometheus/prometheus.yml
+ SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax
+
+sudo systemctl restart prometheus
+
+
+### instalacja alertmanagera ###
+
+cd /tmp
+AVER="0.31.1"
+wget https://github.com/prometheus/alertmanager/releases/download/v${AVER}/alertmanager-${AVER}.linux-amd64.tar.gz
+tar -xvf alertmanager-${AVER}.linux-amd64.tar.gz
+
+sudo mv alertmanager-${AVER}.linux-amd64/alertmanager /usr/local/bin/
+sudo mv alertmanager-${AVER}.linux-amd64/amtool /usr/local/bin/
+sudo chmod +x /usr/local/bin/alertmanager /usr/local/bin/amtool
+
+sudo useradd --no-create-home --shell /usr/sbin/nologin alertmanager || true
+sudo mkdir -p /etc/alertmanager /var/lib/alertmanager
+sudo chown -R alertmanager:alertmanager /etc/alertmanager /var/lib/alertmanager
+
+sudo tee /etc/alertmanager/alertmanager.yml >/dev/null <<'EOF'
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "default"
+
+receivers:
+  - name: "default"
+EOF
+
+sudo chown alertmanager:alertmanager /etc/alertmanager/alertmanager.yml
+
+sudo tee /etc/systemd/system/alertmanager.service >/dev/null <<'EOF'
+[Unit]
+Description=Alertmanager
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=alertmanager
+Group=alertmanager
+Type=simple
+ExecStart=/usr/local/bin/alertmanager \
+  --config.file=/etc/alertmanager/alertmanager.yml \
+  --storage.path=/var/lib/alertmanager \
+  --web.listen-address=0.0.0.0:9093
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now alertmanager
+sudo systemctl status alertmanager --no-pager
+
+
+### dodanie alertmenagera do prometheusa ###
+
+cd /etc/prometheus
+sudo vim prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "/etc/prometheus/rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+      - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: "node"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+
+
+sudo mkdir -p /etc/prometheus/rules
+sudo chown -R prometheus:prometheus /etc/prometheus/rules
+
+sudo promtool check config /etc/prometheus/prometheus.yml
+Checking /etc/prometheus/prometheus.yml
+ SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax
+
+sudo systemctl restart prometheus
+
+
+### przykładowy alert ###
+
+sudo tee /etc/prometheus/rules/docker_alerts.yml >/dev/null <<'EOF'
+groups:
+- name: docker-alerts
+  rules:
+  - alert: ContainerCPUHigh
+    expr: 100 * rate(container_cpu_usage_seconds_total{container!="",image!=""}[1m]) > 80
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High CPU in container"
+      description: "Container {{ $labels.container }} CPU > 80% for 2 minutes on {{ $labels.instance }}."
+EOF
+
+sudo chown prometheus:prometheus /etc/prometheus/rules/docker_alerts.yml
+
+sudo promtool check rules /etc/prometheus/rules/docker_alerts.yml
+Checking /etc/prometheus/rules/docker_alerts.yml
+  SUCCESS: 1 rules found
+
+sudo systemctl restart prometheus
+
+
+### uruchomienie jenkinsa w dockerze ###
+
+docker run -d \
+  --name jenkins \
+  --restart unless-stopped \
+  -p 8081:8080 \
+  -p 50000:50000 \
+  -v jenkins_home:/var/jenkins_home \
+  jenkins/jenkins:lts-jdk21
+
+ewentualnie instalacja poza dockerem: https://www.jenkins.io/doc/book/installing/linux/#debianubuntu
+
+
+### dodanie jenkinsa do prometheusa ###
+
+cd /etc/prometheus
+sudo vim prometheus.yml
+ 
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "/etc/prometheus/rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+      - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: "node"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+
+  - job_name: "jenkins"
+    metrics_path: /prometheus/
+    static_configs:
+      - targets: ["127.0.0.1:8081"]
+
+
+sudo promtool check config /etc/prometheus/prometheus.yml
+Checking /etc/prometheus/prometheus.yml
+  SUCCESS: 1 rule files found
+ SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax
+
+Checking /etc/prometheus/rules/docker_alerts.yml
+  SUCCESS: 1 rules found
+
+sudo systemctl restart prometheus
+
+
+### przykładowe alerty dla jenkinsa ###
+
+sudo tee /etc/prometheus/rules/jenkins_alerts.yml >/dev/null <<'EOF'
+groups:
+- name: jenkins-alerts
+  rules:
+  - alert: JenkinsDown
+    expr: up{job="jenkins"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Jenkins DOWN"
+      description: "Prometheus cannot scrape Jenkins (job=jenkins) for 1 minute on {{ $labels.instance }}."
+
+  - alert: JenkinsScrapeSlow
+    expr: scrape_duration_seconds{job="jenkins"} > 2
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Jenkins scrape is slow"
+      description: "Scrape duration > 2s for 5m on {{ $labels.instance }}."
+
+  - alert: JenkinsTooManyScrapeFailures
+    expr: increase(scrape_samples_scraped{job="jenkins"}[5m]) == 0 and up{job="jenkins"} == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Jenkins returns no samples"
+      description: "Jenkins is up but returns 0 scraped samples for 5 minutes (possible auth/empty endpoint)."
+EOF
+
+
+sudo chown prometheus:prometheus /etc/prometheus/rules/jenkins_alerts.yml
+
+sudo promtool check rules /etc/prometheus/rules/jenkins_alerts.yml
+Checking /etc/prometheus/rules/jenkins_alerts.yml
+  SUCCESS: 3 rules found
+  
+sudo systemctl restart prometheus
+
+
+### GRAFANA ###
+
+https://grafana.com/
+
+
+### instalacja grafany ###
+
+https://grafana.com/grafana/download?pg=get&plcmt=selfmanaged-box1-cta1
+
+sudo apt-get install -y adduser libfontconfig1 musl
+wget https://dl.grafana.com/grafana-enterprise/release/12.3.3/grafana-enterprise_12.3.3_21957728731_linux_amd64.deb
+sudo dpkg -i grafana-enterprise_12.3.3_21957728731_linux_amd64.deb
+
+http://adres_serwera:3000/
+
+Połączenie z prometheusem:
+Połączenia > Dodaj nowe połączenie > Prometheus
+
+Importować dashboard z gotowych: https://grafana.com/grafana/dashboards/?plcmt=oss-nav
+Pulpity > Nowy > Importuj > Adres URL (1860 dla Node Exporter) > Załaduj
