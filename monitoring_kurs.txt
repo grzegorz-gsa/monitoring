@@ -1,4 +1,4 @@
-### DevOps 14.02 - Monitoring (Prometheus, Grafana) ###
+### DevOps 14.02 - Monitoring (Prometheus, Grafana, Loki) ###
 
 materiały od prowadzącego:
 https://drive.proton.me/urls/P5PFSBZ3A8#2HKa351Xqzf9
@@ -414,3 +414,124 @@ Połączenia > Dodaj nowe połączenie > Prometheus
 
 Importować dashboard z gotowych: https://grafana.com/grafana/dashboards/?plcmt=oss-nav
 Pulpity > Nowy > Importuj > Adres URL (1860 dla Node Exporter) > Załaduj
+
+
+### LOKI - agregacja logów ###
+
+### plik loki-config.yaml ###
+
+sudo mkdir -p /opt/loki
+cd /opt/loki
+
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://alertmanager:9093
+
+
+### plik promtail-config.yaml ###
+
+sudo mkdir -p /opt/promtail
+cd /opt/promtail
+
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: varlogs
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: varlogs
+          host: ${HOSTNAME}
+          __path__: /var/log/*.log
+
+  - job_name: docker
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: docker
+          host: ${HOSTNAME}
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - json:
+          expressions:
+            output: log
+            stream: stream
+            time: time
+      - labels:
+          stream:
+      - output:
+          source: output
+
+
+### plik docker-compose.yaml ###
+
+services:
+  loki:
+    image: grafana/loki:3.0.0
+    command: -config.file=/etc/loki/config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    command: -config.file=/etc/promtail/config.yaml
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /etc/hostname:/etc/hostname:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - ./../promtail/promtail-config.yaml:/etc/promtail/config.yaml:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+
+
+### uruchomienie kontenerów ###
+
+sudo docker compose up -d
+
+curl -s http://localhost:3100/ready && echo
+
+następnie w grafanie podłączyć datasource do lokiego (musi być też podłączony prometheus, bo zbiera metryki)
