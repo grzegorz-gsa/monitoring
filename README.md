@@ -1,2 +1,2 @@
 # monitoring
-Prometheus i Grafana
+Prometheus, Grafana, Loki
